@@ -9,7 +9,7 @@ def print_help(prog: str) -> None:
 
 Funktion:
   Liest eine ProjectVic-JSON-Datei ein, sucht zugehörige Mediendateien
-  relativ zum Speicherort der JSON, prüft sie und benennt sie um.
+  relativ zum Speicherort der JSON, prüft sie und benennt die Dateien um.
   Das Skript ist optimiert auf die Bearbeitung von Exporten aus
   Cellebrite PA.
 
