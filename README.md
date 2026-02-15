@@ -10,8 +10,8 @@ The script is meant to reduce the exported files to those that are working and r
 
 ## Command line switches
 
--h    print help
--p    check for missing Python packages
--m    don't delete files, just move valid files to ./valid/, invalid files to ./invalid/
--c    Cleanup mode: deletes all invalid Mediafiles recursively (watch for correct path yourself!)
+-h    print help  
+-p    check for missing Python packages  
+-m    don't delete files, just move valid files to ./valid/, invalid files to ./invalid/  
+-c    Cleanup mode: deletes all invalid Mediafiles recursively (watch for correct path yourself!)  
 no switch: rename files and delete invalid media files
