@@ -231,8 +231,10 @@ Optionen:
   -h, --help        Diese Hilfe anzeigen
   -p                Paket-Abhängigkeiten prüfen
   -c <verzeichnis>  Alle ungültigen Dateien in einem Verzeichnis löschen
+                    (Rekursiv! Keine Warnung! Verzeichnis prüfen!)
   -m <case.json>    Move-Modus: Verschiebt Dateien nach valid/ oder invalid/
-                    statt zu löschen/umbenennen
+                    statt zu löschen/umzubenennen
+  <case.json>       Alle Dateien umbenennen, ungültige löschen
 """)
 
 def main():
