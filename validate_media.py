@@ -9,7 +9,7 @@ from multiprocessing import Process, Queue
 from typing import Optional
 
 # Konfiguration
-MEDIA_CHECK_TIMEOUT = 5.0   # Sekunden Timeout pro Datei
+MEDIA_CHECK_TIMEOUT = 15.0   # Sekunden Timeout pro Datei
 LOG_ENABLED = False         # wird in main() durch -l gesetzt
 
 
