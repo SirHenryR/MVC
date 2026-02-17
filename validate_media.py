@@ -30,7 +30,6 @@ def setup_logging(log_file: Path) -> None:
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
 
-    # Wichtig: mode='a' statt 'w' -> anhängen statt überschreiben[web:123]
     file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
