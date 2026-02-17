@@ -30,13 +30,18 @@ def setup_logging(log_file: Path) -> None:
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
 
-    file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+    # Wichtig: mode='a' statt 'w' -> anhängen statt überschreiben[web:123]
+    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
 
     logger.handlers.clear()
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
+
+    # Optional: Lauf-Trenner ins Log schreiben
+    logger.info("==================================================")
+    logger.info("Neuer Lauf gestartet")
 
 def log_print(msg: str) -> None:
     if LOG_ENABLED:
