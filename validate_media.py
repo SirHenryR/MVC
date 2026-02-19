@@ -247,6 +247,7 @@ def image_format_to_suffix(fmt: str) -> Optional[str]:
     return mapping.get(fmt)
 
 
+
 # ----------------------------------------------------------------------
 # Vor-Normalisierung: Bild/Video erkennen und Extension anpassen
 # ----------------------------------------------------------------------
@@ -258,10 +259,13 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
 
     Bild:
         - Erkennung ausschließlich per Inhalt (detect_image_format), unabhängig von der Extension.
-        - Wird ein Bild erkannt, wird IMMER in folgendes Muster umbenannt:
+        - Wird ein Bild erkannt, wird in folgendes Muster umbenannt:
           (alteEXT)Basename.neueEXT  bzw. (NOEXT)Basename.neueEXT
           alteEXT = alte Extension ohne Punkt, bei keiner Extension "NOEXT".
-        - neueEXT wird aus dem erkannten Format gemappt; wenn kein Mapping existiert, wird .jpg als Fallback genutzt.
+        - neueEXT wird aus dem erkannten Format gemappt; gibt es kein Mapping,
+          wird NICHT auf .jpg zurückgefallen, sondern der Name unverändert gelassen.
+
+        - HEIC bleibt immer HEIC (.heic); es findet KEINE Normalisierung auf .jpg statt.
 
     Video:
         - Nur per bekannter Video-Extension + ffprobe geprüft.
@@ -275,20 +279,24 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     stem = path.stem
 
     # 1) Bild immer per Inhalt prüfen (unabhängig von der Extension)
-    fmt = detect_image_format(path)  # z.B. "JPEG", "PNG", ...
+    fmt = detect_image_format(path)  # z.B. "JPEG", "PNG", "HEIC", ...
     if fmt:
-        new_ext = image_format_to_suffix(fmt)
+        fmt_upper = (fmt or "").upper()
+        new_ext = image_format_to_suffix(fmt_upper)
+
+        # Wenn das Format nicht gemappt werden kann, Name unverändert lassen
+        # (kein allgemeiner Fallback auf .jpg!)
         if not new_ext:
-            # Bild erkannt, aber kein Mapping vorhanden -> pragmatischer Fallback
-            new_ext = ".jpg"
+            log_print(
+                f" -> Bildformat erkannt ({fmt_upper}), aber kein Mapping – "
+                f"Dateiname bleibt unverändert: {path.name}"
+            )
+            return path
 
         old_ext_clean = suffix.lstrip(".") if suffix else "NOEXT"
-
-        # Immer in (alteEXT)Basename.neueEXT bzw. (NOEXT)Basename.neueEXT umbenennen
         new_name = f"({old_ext_clean}){stem}{new_ext}"
         new_path = next_free_name(path.with_name(new_name))
 
-        # Wenn Name sich ändert, umbenennen
         if new_path.name != path.name:
             log_print(
                 f" -> Bild erkannt, Extension-Normalisierung: "
@@ -320,12 +328,12 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
             log_print(" -> Video-Check fehlgeschlagen oder ungültig")
             return None
         log_print(" -> Gültiges Video erkannt (Extension bleibt)")
-        # Für Videos wird die Extension nicht geändert
         return path
 
     # 3) Weder als Bild erkennbar noch Video mit bekannter Extension
     log_print(" -> Weder Bild noch (bekanntes) Video erkannt")
     return None
+
 
 
 
@@ -568,9 +576,10 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             # Gültig (True)
             valid_count += 1
 
-            # Nach der Vor-Normalisierung ist die Extension bereits korrekt,
-            # inkl. (NOEXT)/(alteEXT) im Dateinamen. Hier wird nur noch auf
-            # den Zielnamen aus der JSON abgebildet.
+            # Nach der Vor-Normalisierung ist der Dateiname bereits „sauber“
+            # (mit (alteEXT)/(NOEXT)), und die Extension entspricht dem erkannten
+            # Bildformat bzw. dem Videoformat. Hier wird nur noch auf den Zielnamen
+            # aus der JSON abgebildet.
             target_name = file_name
 
             if move_mode:
@@ -593,6 +602,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     log_print(f"Ungültige Dateien: {invalid_count}")
     log_print(f"Mit Timeout verschoben: {skipped_timeout}")
     log_print(f"Gesamt (bewertet): {valid_count + invalid_count}")
+
 
 
 
