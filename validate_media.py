@@ -250,7 +250,9 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     """
     Normalisiert Dateinamen und prüft grob, ob Bild oder Video.
 
-    - .thumb/.thm: immer in (thumb)Basename.jpg bzw. (thm)Basename.jpg umbenennen.
+    - .thumb/.thm:
+        immer in (thumb)Basename.jpg bzw. (thm)Basename.jpg umbenennen,
+        aber nur, wenn noch nicht normalisiert.
     - Bild (per Inhalt erkannt):
         * Wenn erkannte Extension von der bisherigen abweicht:
               (alteEXT)Basename.neueEXT bzw. (NOEXT)Basename.neueEXT
@@ -262,8 +264,14 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     suffix = path.suffix.lower()
     stem = path.stem
 
-    # 0) Spezialfall: .thumb / .thm immer auf JPG-Thumbnail umbenennen
+    # 0) Spezialfall: .thumb / .thm immer auf JPG-Thumbnail umbenennen,
+    #    aber nur, wenn noch nicht im (thumb)/(thm)-Schema
     if suffix in {".thumb", ".thm"}:
+        # Bereits normalisiert? Dann nichts tun.
+        if stem.startswith("(thumb)") or stem.startswith("(thm)"):
+            log_print(f" -> Thumbnail bereits normalisiert: {path.name}")
+            return path
+
         old_ext_clean = suffix.lstrip(".") or "NOEXT"
         new_ext = ".jpg"
         new_name = f"({old_ext_clean}){stem}{new_ext}"
@@ -272,7 +280,11 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
             f" -> Thumbnail-Spezialfall (ohne Inhaltsprüfung): "
             f"{path.name} -> {new_path.name}"
         )
-        path.rename(new_path)
+        try:
+            path.rename(new_path)
+        except FileNotFoundError:
+            log_print(" -> Thumbnail konnte nicht umbenannt werden (Datei fehlt)")
+            return None
         return new_path
 
     # 1) Bild per Inhalt erkennen
@@ -304,7 +316,11 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
             f" -> Bild erkannt, Extension-Normalisierung: "
             f"{path.name} -> {new_path.name}"
         )
-        path.rename(new_path)
+        try:
+            path.rename(new_path)
+        except FileNotFoundError:
+            log_print(" -> Bild konnte nicht umbenannt werden (Datei fehlt)")
+            return None
         return new_path
 
     # 2) Video per Extension + ffprobe
@@ -331,6 +347,7 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     # 3) Weder Bild noch (bekanntes) Video
     log_print(" -> Weder Bild noch (bekanntes) Video erkannt")
     return None
+
 
 
 
