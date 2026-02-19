@@ -247,8 +247,6 @@ def image_format_to_suffix(fmt: str) -> Optional[str]:
     return mapping.get(fmt)
 
 
-
-
 # ----------------------------------------------------------------------
 # Vor-Normalisierung: Bild/Video erkennen und Extension anpassen
 # ----------------------------------------------------------------------
@@ -351,10 +349,6 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     # 3) Weder als Bild erkennbar noch Video mit bekannter Extension
     log_print(" -> Weder Bild noch (bekanntes) Video erkannt")
     return None
-
-
-
-
 
 
 # ----------------------------------------------------------------------
@@ -623,9 +617,6 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     log_print(f"Gesamt (bewertet): {valid_count + invalid_count}")
 
 
-
-
-
 # ----------------------------------------------------------------------
 # Cleanup-Modus (rekursiv, unabhängig von JSON, parallel + Timeout)
 # ----------------------------------------------------------------------
@@ -656,7 +647,7 @@ def cleanup_directory(directory: Path) -> None:
 
     with Pool(processes=workers) as pool:
         for file_path in all_files:
-            # Vor-Normalisierung wie im JSON-Modus
+            # Vor-Normalisierung
             log_print(f"\nPrüfe (Vor-Normalisierung): {file_path}")
             norm_path = detect_media_and_normalize_suffix(file_path)
 
@@ -747,7 +738,7 @@ Details:
 
 Sonderfälle:
     - Dateien ohne Extension:
-      Werden mit Pillow auf Bildtauglichkeit geprüft; bei Erfolg
+      Werden per Inhalt auf Bildtauglichkeit geprüft; bei Erfolg
       in (NOEXT)NAME.EXT umbenannt (EXT je nach erkanntem Format).
 
     - Dateien mit unbekannter Extension:
