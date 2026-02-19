@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
+
 import json
 import sys
 import shutil
 import logging
 import time
+import subprocess
+import shutil as _shutil
+import json as _json
+
 from pathlib import Path
-from datetime import datetime
 from multiprocessing import Pool, cpu_count, TimeoutError as MPTimeoutError
 from typing import Optional, Tuple, List
 
 # Konfiguration
-MEDIA_CHECK_TIMEOUT = 15.0   # Sekunden Timeout pro Datei
-LOG_ENABLED = False          # wird in main() durch -l gesetzt
-MAX_WORKERS = 4              # maximale Anzahl Worker-Prozesse (0/None = alle CPUs)
+MEDIA_CHECK_TIMEOUT = 10.0  # Sekunden Timeout pro Datei
+LOG_ENABLED = False         # wird in main() durch -l gesetzt
+MAX_WORKERS = 8             # maximale Anzahl Worker-Prozesse (0/None = alle CPUs)
 
 # HEIF/HEIC-Unterstützung registrieren (falls installiert)
 HEIC_SUPPORTED = False
@@ -53,6 +57,7 @@ def setup_logging(log_file: Path) -> None:
     logger.info("==================================================")
     logger.info("Neuer Lauf gestartet")
 
+
 def log_print(msg: str) -> None:
     if LOG_ENABLED:
         logging.info(msg)
@@ -61,12 +66,75 @@ def log_print(msg: str) -> None:
 
 
 # ----------------------------------------------------------------------
+# ffprobe-Hilfsfunktionen
+# ----------------------------------------------------------------------
+
+def has_ffprobe() -> bool:
+    """Prüft, ob ffprobe im PATH verfügbar ist."""
+    return _shutil.which("ffprobe") is not None
+
+
+def is_valid_video_ffprobe(path: Path, timeout: float = 10.0) -> Optional[bool]:
+    """
+    Prüft mit ffprobe, ob die Datei ein lesbares Video mit mind. einem Videostream enthält.
+
+    True  = ffprobe findet Videostream, Rückgabecode 0
+    False = ffprobe-Fehler, kein Videostream oder Auswertungsfehler
+    None  = ffprobe nicht verfügbar oder Timeout
+    """
+    if not has_ffprobe():
+        log_print("  ffprobe nicht gefunden (nicht im PATH)")
+        return None
+
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_streams",
+        "-select_streams", "v:0",
+        "-print_format", "json",
+        str(path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        log_print(f"  ffprobe-Timeout nach {timeout:.1f}s")
+        return None
+    except Exception as e:
+        log_print(f"  ffprobe-Aufruf fehlgeschlagen: {e}")
+        return False
+
+    if result.returncode != 0:
+        err = result.stderr.strip()
+        if err:
+            log_print(f"  ffprobe-Fehler: {err}")
+        return False
+
+    try:
+        data = _json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            log_print("  ffprobe: kein Videostream gefunden")
+            return False
+        return True
+    except Exception as e:
+        log_print(f"  ffprobe-Output nicht lesbar: {e}")
+        return False
+
+
+# ----------------------------------------------------------------------
 # Hilfsfunktionen
 # ----------------------------------------------------------------------
 
 def check_dependencies() -> bool:
     """
-    Prüft, ob Pillow, OpenCV und optional HEIC-Unterstützung installiert sind.
+    Prüft, ob Pillow, ffprobe und optional HEIC-Unterstützung installiert sind.
     """
     missing = []
 
@@ -78,13 +146,15 @@ def check_dependencies() -> bool:
         missing.append("pillow")
         log_print("✗ Pillow fehlt")
 
-    # OpenCV
-    try:
-        import cv2  # noqa
-        log_print("✓ OpenCV ist installiert")
-    except ImportError:
-        missing.append("opencv-python")
-        log_print("✗ OpenCV fehlt")
+    # ffprobe (Teil von ffmpeg)
+    if has_ffprobe():
+        log_print("✓ ffprobe ist im PATH verfügbar")
+    else:
+        log_print("✗ ffprobe fehlt oder ist nicht im PATH")
+        log_print("  Hinweis: ffprobe ist Teil von ffmpeg. Installation z.B.:")
+        log_print("   - Debian/Ubuntu: sudo apt install ffmpeg")
+        log_print("   - macOS (brew):  brew install ffmpeg")
+        log_print("   - Windows (choco): choco install ffmpeg")
 
     # HEIC-Unterstützung
     if HEIC_SUPPORTED:
@@ -94,17 +164,22 @@ def check_dependencies() -> bool:
         log_print("  Hinweis: HEIC-Dateien werden nur als gültig erkannt, wenn pillow-heif verfügbar ist.")
         log_print("  Installation z.B.: pip install pillow-heif")
 
-    if missing:
-        log_print("\nFehlende Pakete installieren, z.B.:")
-        log_print(f"  pip install {' '.join(missing)}")
+    if missing or not has_ffprobe():
+        if missing:
+            log_print("\nFehlende Python-Pakete installieren, z.B.:")
+            log_print(f"  pip install {' '.join(missing)}")
+        if not has_ffprobe():
+            log_print("\nffprobe (ffmpeg) installieren und im PATH verfügbar machen.")
         return False
 
     log_print("✓ Alle erforderlichen Basispakete sind installiert")
     return True
 
+
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
 
 def next_free_name(path: Path) -> Path:
     """
@@ -116,13 +191,14 @@ def next_free_name(path: Path) -> Path:
     stem = path.stem
     suffix = path.suffix
     parent = path.parent
-
     counter = 1
+
     while True:
         candidate = parent / f"{stem}_{counter}{suffix}"
         if not candidate.exists():
             return candidate
         counter += 1
+
 
 def _calc_workers() -> int:
     if MAX_WORKERS and MAX_WORKERS > 0:
@@ -141,52 +217,55 @@ def _check_media_worker(path: Path) -> bool:
     Keine Timeouts hier; Timeout wird im Hauptprozess gehandhabt.
     """
     suffix = path.suffix.lower()
+
     try:
         # Bildformate (inkl. HEIC, wenn unterstützt)
-        image_suffixes = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v", ".hevc", ".h265"]
+        image_suffixes = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"]
         if HEIC_SUPPORTED:
             image_suffixes.append(".heic")
 
         if suffix in image_suffixes:
-            from PIL import Image
+            from PIL import Image, ImageFile
+            # Trunkierte Bilder trotzdem laden (z.B. „image file is truncated“-Fälle tolerieren)
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
             with Image.open(path) as img:
-                img.verify()
-            with Image.open(path) as img:
+                # Nur Öffnen und Laden, kein verify() – toleranter
                 img.load()
             return True
 
-        # Videoformate
-        if suffix in [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v"]:
-            import cv2
-            cap = cv2.VideoCapture(str(path))
-            if not cap.isOpened():
-                return False
-            ret, frame = cap.read()
-            cap.release()
-            return bool(ret and frame is not None)
+        # Videoformate (inkl. rohe HEVC-Streams)
+        if suffix in [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v", ".hevc", ".h265"]:
+            ok = is_valid_video_ffprobe(path, timeout=10.0)
+            # Wenn ffprobe nicht verfügbar (None), behandeln wir das als ungültig,
+            # damit der Aufrufer sieht, dass etwas schiefgelaufen ist.
+            return bool(ok)
 
         # unbekanntes Format -> ungültig
         return False
-    except Exception:
+
+    except Exception as e:
+        log_print(f" Medienprüfung fehlgeschlagen: {e}")
         return False
+
 
 def is_valid_media(path: Path, timeout: float, pool: Pool) -> Optional[bool]:
     """
     Prüft mit Timeout im Hauptprozess, ob Datei ein gültiges Bild/Video ist.
 
     Rückgabewerte:
-      True  = gültig
-      False = ungültig
-      None  = Prüfung abgebrochen (Timeout oder interner Fehler)
+    True  = gültig
+    False = ungültig
+    None  = Prüfung abgebrochen (Timeout oder interner Fehler)
     """
     async_result = pool.apply_async(_check_media_worker, (path,))
+
     try:
         return async_result.get(timeout=timeout)
     except MPTimeoutError:
-        log_print(f"  Prüfung abgebrochen (Timeout nach {timeout:.1f}s)")
+        log_print(f" Prüfung abgebrochen (Timeout nach {timeout:.1f}s)")
         return None
     except Exception:
-        log_print("  Prüfung abgebrochen (Fehler im Worker)")
+        log_print(" Prüfung abgebrochen (Fehler im Worker)")
         return None
 
 
@@ -199,28 +278,39 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     Verarbeitet Mediendateien aus der ProjectVic-JSON.
 
     move_mode=False:
-        - gültige Dateien werden im Medienordner umbenannt
-        - ungültige Dateien werden gelöscht
+      - gültige Dateien werden im Medienordner umbenannt
+      - ungültige Dateien werden gelöscht
+      - Dateien mit Timeout werden nach base_dir/timeout/ verschoben
 
     move_mode=True:
-        - gültige Dateien werden nach base_dir/valid/ verschoben (mit neuem Namen)
-        - ungültige Dateien werden nach base_dir/invalid/ verschoben
+      - gültige Dateien werden nach base_dir/valid/ verschoben (mit neuem Namen)
+      - ungültige Dateien werden nach base_dir/invalid/ verschoben
+      - Dateien mit Timeout werden nach base_dir/timeout/ verschoben
     """
+    timeout_dir = base_dir / "timeout"
+    timeout_dir.mkdir(exist_ok=True)
+
     if move_mode:
         valid_dir = base_dir / "valid"
         invalid_dir = base_dir / "invalid"
         valid_dir.mkdir(exist_ok=True)
         invalid_dir.mkdir(exist_ok=True)
+
         log_print("Move-Modus aktiv")
-        log_print(f"  Valid:   {valid_dir}")
-        log_print(f"  Invalid: {invalid_dir}")
+        log_print(f" Valid: {valid_dir}")
+        log_print(f" Invalid: {invalid_dir}")
+        log_print(f" Timeout: {timeout_dir}")
+    else:
+        log_print(f"Timeout-Verzeichnis: {timeout_dir}")
 
     # 1. Alle relevanten Dateien aus der JSON einsammeln
     tasks: List[Tuple[Path, str]] = []
+
     for case in json_data.get("value", []):
         for media in case.get("Media", []):
             rel_path = media.get("RelativeFilePath")
             media_files = media.get("MediaFiles") or []
+
             if not rel_path or not media_files:
                 continue
 
@@ -243,10 +333,10 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
 
     if not tasks:
         log_print("\n=== Statistik ===")
-        log_print(f"Gültige Dateien:          {valid_count}")
-        log_print(f"Ungültige Dateien:        {invalid_count}")
-        log_print(f"Mit Timeout übersprungen: {skipped_timeout}")
-        log_print(f"Gesamt (bewertet):        {valid_count + invalid_count}")
+        log_print(f"Gültige Dateien: {valid_count}")
+        log_print(f"Ungültige Dateien: {invalid_count}")
+        log_print(f"Mit Timeout verschoben: {skipped_timeout}")
+        log_print(f"Gesamt (bewertet): {valid_count + invalid_count}")
         return
 
     workers = _calc_workers()
@@ -258,10 +348,17 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             log_print(f"\nPrüfe: {old_path}")
             check_result = is_valid_media(old_path, MEDIA_CHECK_TIMEOUT, pool)
 
-            # None = Timeout / Fehler -> Datei unangetastet lassen
+            # None = Timeout / Fehler -> Datei nach timeout/ verschieben
             if check_result is None:
                 skipped_timeout += 1
-                log_print("  -> Prüfung ohne Ergebnis (Timeout/Fehler), Datei bleibt unverändert")
+                dest = next_free_name(timeout_dir / old_path.name)
+                log_print(" -> Prüfung ohne Ergebnis (Timeout/Fehler)")
+                log_print(f" -> Verschiebe nach timeout/: {dest.name}")
+                try:
+                    shutil.move(str(old_path), str(dest))
+                    log_print(" -> Erfolgreich verschoben")
+                except Exception as e:
+                    log_print(f" -> Fehler beim Verschieben: {e}")
                 continue
 
             # Ungültig (False)
@@ -269,19 +366,19 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
                 invalid_count += 1
                 if move_mode:
                     dest = next_free_name((base_dir / "invalid") / old_path.name)
-                    log_print(f"  -> Verschiebe nach invalid/: {dest.name}")
+                    log_print(f" -> Verschiebe nach invalid/: {dest.name}")
                     try:
                         shutil.move(str(old_path), str(dest))
-                        log_print("  -> Erfolgreich verschoben")
+                        log_print(" -> Erfolgreich verschoben")
                     except Exception as e:
-                        log_print(f"  -> Fehler beim Verschieben: {e}")
+                        log_print(f" -> Fehler beim Verschieben: {e}")
                 else:
-                    log_print(f"  -> Lösche Datei: {old_path}")
+                    log_print(f" -> Lösche Datei: {old_path}")
                     try:
                         old_path.unlink()
-                        log_print("  -> Erfolgreich gelöscht")
+                        log_print(" -> Erfolgreich gelöscht")
                     except Exception as e:
-                        log_print(f"  -> Fehler beim Löschen: {e}")
+                        log_print(f" -> Fehler beim Löschen: {e}")
                 continue
 
             # Gültig (True)
@@ -289,23 +386,23 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             if move_mode:
                 desired_dest = (base_dir / "valid") / file_name
                 dest = next_free_name(desired_dest)
-                log_print(f"  -> Verschiebe nach valid/: {dest.name}")
+                log_print(f" -> Verschiebe nach valid/: {dest.name}")
                 try:
                     shutil.move(str(old_path), str(dest))
-                    log_print("  -> Erfolgreich verschoben")
+                    log_print(" -> Erfolgreich verschoben")
                 except Exception as e:
-                    log_print(f"  -> Fehler beim Verschieben: {e}")
+                    log_print(f" -> Fehler beim Verschieben: {e}")
             else:
                 desired_new = old_path.with_name(file_name)
                 new_path = next_free_name(desired_new)
-                log_print(f"  -> Benenne um: {new_path.name}")
+                log_print(f" -> Benenne um: {new_path.name}")
                 old_path.rename(new_path)
 
     log_print("\n=== Statistik ===")
-    log_print(f"Gültige Dateien:          {valid_count}")
-    log_print(f"Ungültige Dateien:        {invalid_count}")
-    log_print(f"Mit Timeout übersprungen: {skipped_timeout}")
-    log_print(f"Gesamt (bewertet):        {valid_count + invalid_count}")
+    log_print(f"Gültige Dateien: {valid_count}")
+    log_print(f"Ungültige Dateien: {invalid_count}")
+    log_print(f"Mit Timeout verschoben: {skipped_timeout}")
+    log_print(f"Gesamt (bewertet): {valid_count + invalid_count}")
 
 
 # ----------------------------------------------------------------------
@@ -315,8 +412,14 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
 def cleanup_directory(directory: Path) -> None:
     """
     Durchsucht ein Verzeichnis rekursiv und löscht alle ungültigen Mediendateien.
+    Dateien mit Timeout werden nach /timeout/ verschoben.
     """
     log_print(f"\nBereinige Verzeichnis: {directory}")
+
+    timeout_dir = directory / "timeout"
+    timeout_dir.mkdir(exist_ok=True)
+    log_print(f"Timeout-Verzeichnis: {timeout_dir}")
+
     all_files: List[Path] = [p for p in directory.rglob("*") if p.is_file()]
     log_print(f"Zu prüfende Dateien (Cleanup): {len(all_files)}")
 
@@ -337,21 +440,28 @@ def cleanup_directory(directory: Path) -> None:
 
             if check_result is None:
                 skipped_timeout += 1
-                log_print("  -> Prüfung ohne Ergebnis (Timeout/Fehler), Datei bleibt unverändert")
+                log_print(" -> Prüfung ohne Ergebnis (Timeout/Fehler)")
+                dest = next_free_name(timeout_dir / file_path.name)
+                log_print(f" -> Verschiebe nach timeout/: {dest.name}")
+                try:
+                    shutil.move(str(file_path), str(dest))
+                    log_print(" -> Erfolgreich verschoben")
+                except Exception as e:
+                    log_print(f" -> Fehler beim Verschieben: {e}")
                 continue
 
             if not check_result:
-                log_print(f"  -> Lösche ungültige Datei: {file_path}")
+                log_print(f" -> Lösche ungültige Datei: {file_path}")
                 try:
                     file_path.unlink()
                     deleted_count += 1
-                    log_print("  -> Erfolgreich gelöscht")
+                    log_print(" -> Erfolgreich gelöscht")
                 except Exception as e:
-                    log_print(f"  -> Fehler beim Löschen: {e}")
+                    log_print(f" -> Fehler beim Löschen: {e}")
 
     log_print(f"\n{deleted_count} ungültige Datei(en) gelöscht.")
     if skipped_timeout:
-        log_print(f"{skipped_timeout} Datei(en) wegen Timeout/Fehler unverändert gelassen.")
+        log_print(f"{skipped_timeout} Datei(en) wegen Timeout/Fehler nach timeout/ verschoben.")
 
 
 # ----------------------------------------------------------------------
@@ -360,53 +470,62 @@ def cleanup_directory(directory: Path) -> None:
 
 def print_help(prog: str) -> None:
     print(f"""Verwendung:
-  {prog} <case.json>
-      Standard: Gültige Dateien umbenennen, ungültige löschen.
 
-  {prog} -m <case.json>
-      Move-Modus: Gültige nach ./valid/, ungültige nach ./invalid/ verschieben.
+  {prog}
+    Standard: Gültige Dateien umbenennen, ungültige löschen.
 
-  {prog} -c <verzeichnis>
-      Cleanup-Modus: Verzeichnis rekursiv prüfen, ungültige Dateien löschen.
+  {prog} -m
+    Move-Modus: Gültige nach ./valid/, ungültige nach ./invalid/ verschieben.
+
+  {prog} -c
+    Cleanup-Modus: Verzeichnis rekursiv prüfen, ungültige Dateien löschen.
 
   {prog} -p
-      Paket-Abhängigkeiten (Pillow, OpenCV) prüfen.
+    Paket-Abhängigkeiten (Pillow, ffprobe) prüfen.
 
 Optionen:
+
   -l
-      Optional: Logging in Logdatei aktivieren.
-      Bei JSON: <case>.log
-      Bei -c:   <verzeichnis>_cleanup.log
-      Bei -p:   dependency_check.log
+    Optional: Logging in Logdatei aktivieren.
+    Bei JSON: .log
+    Bei -c: _cleanup.log
+    Bei -p: dependency_check.log
 
 Funktion:
+
   Liest eine ProjectVic-JSON-Datei ein, sucht zugehörige Mediendateien
   relativ zum Speicherort der JSON, prüft sie und benennt sie um.
   Ungültige Dateien werden gelöscht, bei Nutzung von -m verschoben.
 
 Details:
+
   - Für jeden Eintrag unter "Media" wird die Datei aus "RelativeFilePath"
     gesucht.
   - Ist die Datei kein gültiges Bild/Video oder hat ein unbekanntes Format,
     wird sie gelöscht (Standard-Modus) oder nach invalid/ verschoben (-m).
   - Ist die Datei gültig, wird sie in den "FileName" aus "MediaFiles[0]"
     umbenannt (Standard) oder nach valid/ verschoben (-m).
-  - Falls der gewünschte Zielname bereits existiert, wird "_<Nummer>"
+  - Falls der gewünschte Zielname bereits existiert, wird "_"
     vor der Dateiendung angehängt (z.B. foo_1.mp4, foo_2.mp4, ...).
 
 Optionen:
-  -h, --help        Diese Hilfe anzeigen
-  -p                Paket-Abhängigkeiten prüfen
-  -c <verzeichnis>  Alle ungültigen Dateien in einem Verzeichnis löschen
-                    (Rekursiv! Keine Warnung! Verzeichnis prüfen!)
-  -m <case.json>    Move-Modus: Verschiebt Dateien nach valid/ oder invalid/
-                    statt zu löschen/umzubenennen
-  -l (optional)     Logging nach <case>.log (andernfalls nur Ausgabe)
-  <case.json>       Alle Dateien umbenennen, ungültige löschen
+
+  -h, --help  Diese Hilfe anzeigen
+  -p          Paket-Abhängigkeiten prüfen
+  -c          Alle ungültigen Dateien in einem Verzeichnis löschen
+              (Rekursiv! Keine Warnung! Verzeichnis prüfen!)
+  -m          Move-Modus: Verschiebt Dateien nach valid/ oder invalid/
+              statt zu löschen/umzubenennen
+  -l          (optional) Logging nach .log (andernfalls nur Ausgabe)
+
+Alle Dateien umbenennen, ungültige löschen
 
 Hinweise:
+
   - Die Medienprüfung hat einen Timeout von {MEDIA_CHECK_TIMEOUT:.1f}s pro Datei.
-  - Bei Timeout/Fehler wird die Datei nicht verändert (nur protokolliert).
+  - Bei Timeout/Fehler wird die Datei nicht verändert, sondern nach timeout/ verschoben.
+  - Für Videodateien wird ffprobe (Teil von ffmpeg) verwendet. ffprobe muss im PATH
+    verfügbar sein, sonst werden Videos als ungültig behandelt.
 """)
 
 
@@ -415,7 +534,6 @@ def main() -> None:
 
     prog = Path(sys.argv[0]).name
     args = sys.argv[1:]
-
     start_time = time.time()
 
     if not args or args[0] in ("-h", "--help"):
@@ -453,22 +571,25 @@ def main() -> None:
     if dep_check:
         if LOG_ENABLED:
             setup_logging(Path("dependency_check.log"))
-            log_print("Starte Paketprüfung (mit Logdatei)")
-        check_dependencies()
+        log_print("Starte Paketprüfung (mit Logdatei)")
+        ok = check_dependencies()
         elapsed = time.time() - start_time
         log_print(f"Gesamtlaufzeit: {elapsed:.2f} Sekunden")
-        sys.exit(0)
+        sys.exit(0 if ok else 1)
 
     # Cleanup-Modus (-c)
     if cleanup_dir is not None:
         if not cleanup_dir.exists() or not cleanup_dir.is_dir():
             print(f"Fehler: Verzeichnis nicht gefunden: {cleanup_dir}")
             sys.exit(1)
+
         if LOG_ENABLED:
             log_file = cleanup_dir.parent / f"{cleanup_dir.name}_cleanup.log"
             setup_logging(log_file)
             log_print(f"Log-Datei: {log_file}")
+
         cleanup_directory(cleanup_dir)
+
         elapsed = time.time() - start_time
         log_print(f"Gesamtlaufzeit: {elapsed:.2f} Sekunden")
         log_print("Fertig!")
@@ -490,6 +611,7 @@ def main() -> None:
 
     base_dir = json_path.parent.resolve()
     data = load_json(json_path)
+
     rename_media_files(data, base_dir, move_mode=move_mode)
 
     elapsed = time.time() - start_time
