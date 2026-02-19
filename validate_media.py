@@ -251,7 +251,11 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     Normalisiert Dateinamen und prüft grob, ob Bild oder Video.
 
     - .thumb/.thm: immer in (thumb)Basename.jpg bzw. (thm)Basename.jpg umbenennen.
-    - Bild (per Inhalt erkannt): (alteEXT)Basename.neueEXT bzw. (NOEXT)Basename.neueEXT.
+    - Bild (per Inhalt erkannt):
+        * Wenn erkannte Extension von der bisherigen abweicht:
+              (alteEXT)Basename.neueEXT bzw. (NOEXT)Basename.neueEXT
+        * Wenn erkannte Extension gleich der bisherigen ist:
+              Name bleibt unverändert.
     - HEIC bleibt .heic (kein JPG-Fallback).
     - Video: per Extension + ffprobe, keine Umbenennung.
     """
@@ -265,7 +269,8 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
         new_name = f"({old_ext_clean}){stem}{new_ext}"
         new_path = next_free_name(path.with_name(new_name))
         log_print(
-            f" -> Thumbnail-Spezialfall (ohne Inhaltsprüfung): {path.name} -> {new_path.name}"
+            f" -> Thumbnail-Spezialfall (ohne Inhaltsprüfung): "
+            f"{path.name} -> {new_path.name}"
         )
         path.rename(new_path)
         return new_path
@@ -277,19 +282,29 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
         new_ext = image_format_to_suffix(fmt_upper)
         if not new_ext:
             log_print(
-                f" -> Bildformat erkannt ({fmt_upper}), aber kein Mapping – Dateiname bleibt unverändert: {path.name}"
+                f" -> Bildformat erkannt ({fmt_upper}), aber kein Mapping – "
+                f"Dateiname bleibt unverändert: {path.name}"
             )
             return path
-        old_ext_clean = suffix.lstrip(".") if suffix else "NOEXT"
-        new_name = f"({old_ext_clean}){stem}{new_ext}"
-        new_path = next_free_name(path.with_name(new_name))
-        if new_path.name != path.name:
+
+        old_ext = path.suffix.lower()
+
+        # Wenn erkannte Extension der bisherigen entspricht: nichts ändern
+        if old_ext == new_ext.lower():
             log_print(
-                f" -> Bild erkannt, Extension-Normalisierung: {path.name} -> {new_path.name}"
+                f" -> Bild erkannt ({fmt_upper}), Extension stimmt bereits: {path.name}"
             )
-            path.rename(new_path)
-        else:
-            log_print(f" -> Bild erkannt, Name bleibt: {path.name}")
+            return path
+
+        # Abweichende oder fehlende Extension -> (alteEXT)Basename.neueEXT
+        old_ext_clean = old_ext.lstrip(".") if old_ext else "NOEXT"
+        new_name = f"({old_ext_clean}){path.stem}{new_ext}"
+        new_path = next_free_name(path.with_name(new_name))
+        log_print(
+            f" -> Bild erkannt, Extension-Normalisierung: "
+            f"{path.name} -> {new_path.name}"
+        )
+        path.rename(new_path)
         return new_path
 
     # 2) Video per Extension + ffprobe
@@ -316,6 +331,7 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     # 3) Weder Bild noch (bekanntes) Video
     log_print(" -> Weder Bild noch (bekanntes) Video erkannt")
     return None
+
 
 
 # ----------------------------------------------------------------------
