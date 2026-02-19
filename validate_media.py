@@ -539,15 +539,15 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             suffix = old_path.suffix.lower()
             target_name = file_name
 
-            # Dateien ohne Extension -> (NOEXT)NAME.ext
+            # Dateien ohne Extension -> (NOEXT)NAME.ext (mit Fallback)
             if suffix == "":
                 fmt = detect_image_format(old_path)
-                ext = image_format_to_suffix(fmt) or ""
+                ext = image_format_to_suffix(fmt)
+                if not ext:
+                    # Fallback, falls das Format nicht gemappt werden kann:
+                    ext = ".jpg"
                 base_stem = Path(file_name).stem
-                if ext:
-                    target_name = f"(NOEXT){base_stem}{ext}"
-                else:
-                    target_name = f"(NOEXT){file_name}"
+                target_name = f"(NOEXT){base_stem}{ext}"
             else:
                 # Einordnung in bekannte Typen
                 known_image_suffixes = [
@@ -604,6 +604,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     log_print(f"Ungültige Dateien: {invalid_count}")
     log_print(f"Mit Timeout verschoben: {skipped_timeout}")
     log_print(f"Gesamt (bewertet): {valid_count + invalid_count}")
+
 
 
 # ----------------------------------------------------------------------
