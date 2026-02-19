@@ -437,6 +437,8 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
         - Gültige Dateien werden mit ihrem normalisierten Namen verschoben:
           - Move-Modus: nach base_dir/valid/
           - Standard: im Medienordner umbenannt
+        - Wenn die Ursprungsdatei während der Vorprüfung schon nicht mehr existiert,
+          wird nur geloggt und nichts mehr verschoben/gelöscht.
     """
     timeout_dir = base_dir / "timeout"
     timeout_dir.mkdir(exist_ok=True)
@@ -468,7 +470,6 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             if not old_path.exists():
                 log_print(f"Warnung: Datei nicht gefunden: {old_path}")
                 continue
-            # file_name wird noch gesammelt, aber für den Zielnamen später nicht mehr benutzt
             tasks.append((old_path, file_name))
 
     log_print(f"Zu prüfende Dateien (aus JSON): {len(tasks)}")
@@ -496,6 +497,17 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             norm_path = detect_media_and_normalize_suffix(old_path)
 
             if norm_path is None:
+                # Kann zwei Gründe haben:
+                # 1. Weder Bild noch Video (wirklich ungültig)
+                # 2. Datei wurde zwischenzeitlich umbenannt/gelöscht (Race)
+                if not old_path.exists():
+                    log_print(
+                        " -> Vorprüfung abgebrochen: Ursprungsdatei existiert nicht mehr, "
+                        "kein weiterer Eingriff."
+                    )
+                    # NICHT versuchen, nach invalid/ zu verschieben oder zu löschen
+                    continue
+
                 log_print(" -> Keine gültige Bild-/Videodatei (Vorprüfung)")
                 invalid_count += 1
                 if move_mode:
@@ -515,6 +527,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
                         log_print(f" -> Fehler beim Löschen: {e}")
                 continue
 
+            # Ab hier nur noch mit dem normalisierten Pfad arbeiten
             old_path = norm_path
 
             # 2.2 Hauptprüfung
@@ -557,7 +570,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             # 2.3 Gültige Dateien verschieben/umbenennen
             valid_count += 1
 
-            # WICHTIG: jetzt den normalisierten Namen verwenden, nicht den JSON-FileName
+            # Jetzt den normalisierten Namen verwenden, nicht den JSON-FileName
             target_name = old_path.name
 
             if move_mode:
@@ -580,6 +593,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     log_print(f"Ungültige Dateien: {invalid_count}")
     log_print(f"Mit Timeout verschoben: {skipped_timeout}")
     log_print(f"Gesamt (bewertet): {valid_count + invalid_count}")
+
 
 
 
