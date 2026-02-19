@@ -3,14 +3,25 @@ import json
 import sys
 import shutil
 import logging
+import time
 from pathlib import Path
 from datetime import datetime
-from multiprocessing import Process, Queue
-from typing import Optional
+from multiprocessing import Pool, cpu_count, TimeoutError as MPTimeoutError
+from typing import Optional, Tuple, List
 
 # Konfiguration
 MEDIA_CHECK_TIMEOUT = 15.0   # Sekunden Timeout pro Datei
-LOG_ENABLED = False         # wird in main() durch -l gesetzt
+LOG_ENABLED = False          # wird in main() durch -l gesetzt
+MAX_WORKERS = 4              # maximale Anzahl Worker-Prozesse (0/None = alle CPUs)
+
+# HEIF/HEIC-Unterstützung registrieren (falls installiert)
+HEIC_SUPPORTED = False
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIC_SUPPORTED = True
+except ImportError:
+    HEIC_SUPPORTED = False
 
 
 # ----------------------------------------------------------------------
@@ -55,10 +66,11 @@ def log_print(msg: str) -> None:
 
 def check_dependencies() -> bool:
     """
-    Prüft, ob Pillow und OpenCV installiert sind.
+    Prüft, ob Pillow, OpenCV und optional HEIC-Unterstützung installiert sind.
     """
     missing = []
 
+    # Pillow
     try:
         import PIL  # noqa
         log_print("✓ Pillow ist installiert")
@@ -66,6 +78,7 @@ def check_dependencies() -> bool:
         missing.append("pillow")
         log_print("✗ Pillow fehlt")
 
+    # OpenCV
     try:
         import cv2  # noqa
         log_print("✓ OpenCV ist installiert")
@@ -73,12 +86,20 @@ def check_dependencies() -> bool:
         missing.append("opencv-python")
         log_print("✗ OpenCV fehlt")
 
+    # HEIC-Unterstützung
+    if HEIC_SUPPORTED:
+        log_print("✓ HEIC-Unterstützung (pillow-heif) ist aktiviert")
+    else:
+        log_print("! HEIC-Unterstützung nicht aktiv (pillow-heif nicht installiert?)")
+        log_print("  Hinweis: HEIC-Dateien werden nur als gültig erkannt, wenn pillow-heif verfügbar ist.")
+        log_print("  Installation z.B.: pip install pillow-heif")
+
     if missing:
         log_print("\nFehlende Pakete installieren, z.B.:")
         log_print(f"  pip install {' '.join(missing)}")
         return False
 
-    log_print("✓ Alle erforderlichen Pakete sind installiert")
+    log_print("✓ Alle erforderlichen Basispakete sind installiert")
     return True
 
 def load_json(path: Path):
@@ -103,77 +124,74 @@ def next_free_name(path: Path) -> Path:
             return candidate
         counter += 1
 
+def _calc_workers() -> int:
+    if MAX_WORKERS and MAX_WORKERS > 0:
+        return min(cpu_count(), MAX_WORKERS)
+    return cpu_count()
+
 
 # ----------------------------------------------------------------------
-# Medienprüfung (Worker + Wrapper mit Timeout)
+# Medienprüfung (im Worker, ohne weiteren Process)
 # ----------------------------------------------------------------------
 
-def _check_media_worker(path: Path, q: Queue) -> None:
+def _check_media_worker(path: Path) -> bool:
     """
-    Läuft im separaten Prozess.
-    Schreibt True (gültig) oder False (ungültig) in die Queue.
+    Läuft im Worker-Prozess.
+    Gibt True (gültig) oder False (ungültig) zurück.
+    Keine Timeouts hier; Timeout wird im Hauptprozess gehandhabt.
     """
     suffix = path.suffix.lower()
     try:
-        # Bildformate
-        if suffix in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"]:
+        # Bildformate (inkl. HEIC, wenn unterstützt)
+        image_suffixes = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v", ".hevc", ".h265"]
+        if HEIC_SUPPORTED:
+            image_suffixes.append(".heic")
+
+        if suffix in image_suffixes:
             from PIL import Image
             with Image.open(path) as img:
                 img.verify()
             with Image.open(path) as img:
                 img.load()
-            q.put(True)
-            return
+            return True
 
         # Videoformate
         if suffix in [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v"]:
             import cv2
             cap = cv2.VideoCapture(str(path))
             if not cap.isOpened():
-                q.put(False)
-                return
+                return False
             ret, frame = cap.read()
             cap.release()
-            q.put(bool(ret and frame is not None))
-            return
+            return bool(ret and frame is not None)
 
         # unbekanntes Format -> ungültig
-        q.put(False)
+        return False
     except Exception:
-        q.put(False)
+        return False
 
-def is_valid_media(path: Path, timeout: float = MEDIA_CHECK_TIMEOUT) -> Optional[bool]:
+def is_valid_media(path: Path, timeout: float, pool: Pool) -> Optional[bool]:
     """
-    Prüft mit Timeout, ob Datei ein gültiges Bild/Video ist.
+    Prüft mit Timeout im Hauptprozess, ob Datei ein gültiges Bild/Video ist.
 
     Rückgabewerte:
       True  = gültig
       False = ungültig
       None  = Prüfung abgebrochen (Timeout oder interner Fehler)
     """
-    q: Queue = Queue(maxsize=1)
-    p = Process(target=_check_media_worker, args=(path, q))
-    p.start()
-    p.join(timeout)
-
-    if p.is_alive():
-        # Timeout: Prozess abbrechen
-        p.terminate()
-        p.join()
+    async_result = pool.apply_async(_check_media_worker, (path,))
+    try:
+        return async_result.get(timeout=timeout)
+    except MPTimeoutError:
         log_print(f"  Prüfung abgebrochen (Timeout nach {timeout:.1f}s)")
         return None
-
-    try:
-        result = q.get_nowait()
     except Exception:
-        log_print("  Prüfung abgebrochen (kein Ergebnis aus Worker)")
+        log_print("  Prüfung abgebrochen (Fehler im Worker)")
         return None
-
-    return bool(result)
 
 
 # ----------------------------------------------------------------------
-# Hauptlogik: JSON-basierte Verarbeitung
+# Hauptlogik: JSON-basierte Verarbeitung (parallel + Timeout)
 # ----------------------------------------------------------------------
 
 def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> None:
@@ -197,10 +215,8 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
         log_print(f"  Valid:   {valid_dir}")
         log_print(f"  Invalid: {invalid_dir}")
 
-    valid_count = 0
-    invalid_count = 0
-    skipped_timeout = 0
-
+    # 1. Alle relevanten Dateien aus der JSON einsammeln
+    tasks: List[Tuple[Path, str]] = []
     for case in json_data.get("value", []):
         for media in case.get("Media", []):
             rel_path = media.get("RelativeFilePath")
@@ -217,9 +233,30 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
                 log_print(f"Warnung: Datei nicht gefunden: {old_path}")
                 continue
 
-            log_print(f"\nPrüfe: {old_path}")
+            tasks.append((old_path, file_name))
 
-            check_result = is_valid_media(old_path)
+    log_print(f"Zu prüfende Dateien (aus JSON): {len(tasks)}")
+
+    valid_count = 0
+    invalid_count = 0
+    skipped_timeout = 0
+
+    if not tasks:
+        log_print("\n=== Statistik ===")
+        log_print(f"Gültige Dateien:          {valid_count}")
+        log_print(f"Ungültige Dateien:        {invalid_count}")
+        log_print(f"Mit Timeout übersprungen: {skipped_timeout}")
+        log_print(f"Gesamt (bewertet):        {valid_count + invalid_count}")
+        return
+
+    workers = _calc_workers()
+    log_print(f"Starte Prüfungen mit {workers} Worker-Prozess(en)")
+
+    # 2. Pool erstellen und pro Datei mit Timeout prüfen
+    with Pool(processes=workers) as pool:
+        for old_path, file_name in tasks:
+            log_print(f"\nPrüfe: {old_path}")
+            check_result = is_valid_media(old_path, MEDIA_CHECK_TIMEOUT, pool)
 
             # None = Timeout / Fehler -> Datei unangetastet lassen
             if check_result is None:
@@ -272,7 +309,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
 
 
 # ----------------------------------------------------------------------
-# Cleanup-Modus (rekursiv, unabhängig von JSON)
+# Cleanup-Modus (rekursiv, unabhängig von JSON, parallel + Timeout)
 # ----------------------------------------------------------------------
 
 def cleanup_directory(directory: Path) -> None:
@@ -280,29 +317,41 @@ def cleanup_directory(directory: Path) -> None:
     Durchsucht ein Verzeichnis rekursiv und löscht alle ungültigen Mediendateien.
     """
     log_print(f"\nBereinige Verzeichnis: {directory}")
+    all_files: List[Path] = [p for p in directory.rglob("*") if p.is_file()]
+    log_print(f"Zu prüfende Dateien (Cleanup): {len(all_files)}")
+
     deleted_count = 0
+    skipped_timeout = 0
 
-    for file_path in directory.rglob("*"):
-        if not file_path.is_file():
-            continue
+    if not all_files:
+        log_print(f"\n{deleted_count} ungültige Datei(en) gelöscht.")
+        return
 
-        log_print(f"\nPrüfe: {file_path}")
-        check_result = is_valid_media(file_path)
+    workers = _calc_workers()
+    log_print(f"Starte Cleanup-Prüfungen mit {workers} Worker-Prozess(en)")
 
-        if check_result is None:
-            log_print("  -> Prüfung ohne Ergebnis (Timeout/Fehler), Datei bleibt unverändert")
-            continue
+    with Pool(processes=workers) as pool:
+        for file_path in all_files:
+            log_print(f"\nPrüfe: {file_path}")
+            check_result = is_valid_media(file_path, MEDIA_CHECK_TIMEOUT, pool)
 
-        if not check_result:
-            log_print(f"  -> Lösche ungültige Datei: {file_path}")
-            try:
-                file_path.unlink()
-                deleted_count += 1
-                log_print("  -> Erfolgreich gelöscht")
-            except Exception as e:
-                log_print(f"  -> Fehler beim Löschen: {e}")
+            if check_result is None:
+                skipped_timeout += 1
+                log_print("  -> Prüfung ohne Ergebnis (Timeout/Fehler), Datei bleibt unverändert")
+                continue
+
+            if not check_result:
+                log_print(f"  -> Lösche ungültige Datei: {file_path}")
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                    log_print("  -> Erfolgreich gelöscht")
+                except Exception as e:
+                    log_print(f"  -> Fehler beim Löschen: {e}")
 
     log_print(f"\n{deleted_count} ungültige Datei(en) gelöscht.")
+    if skipped_timeout:
+        log_print(f"{skipped_timeout} Datei(en) wegen Timeout/Fehler unverändert gelassen.")
 
 
 # ----------------------------------------------------------------------
@@ -367,6 +416,8 @@ def main() -> None:
     prog = Path(sys.argv[0]).name
     args = sys.argv[1:]
 
+    start_time = time.time()
+
     if not args or args[0] in ("-h", "--help"):
         print_help(prog)
         sys.exit(0)
@@ -404,6 +455,8 @@ def main() -> None:
             setup_logging(Path("dependency_check.log"))
             log_print("Starte Paketprüfung (mit Logdatei)")
         check_dependencies()
+        elapsed = time.time() - start_time
+        log_print(f"Gesamtlaufzeit: {elapsed:.2f} Sekunden")
         sys.exit(0)
 
     # Cleanup-Modus (-c)
@@ -416,6 +469,8 @@ def main() -> None:
             setup_logging(log_file)
             log_print(f"Log-Datei: {log_file}")
         cleanup_directory(cleanup_dir)
+        elapsed = time.time() - start_time
+        log_print(f"Gesamtlaufzeit: {elapsed:.2f} Sekunden")
         log_print("Fertig!")
         sys.exit(0)
 
@@ -436,6 +491,9 @@ def main() -> None:
     base_dir = json_path.parent.resolve()
     data = load_json(json_path)
     rename_media_files(data, base_dir, move_mode=move_mode)
+
+    elapsed = time.time() - start_time
+    log_print(f"Gesamtlaufzeit: {elapsed:.2f} Sekunden")
     log_print("Fertig!")
 
 
