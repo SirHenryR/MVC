@@ -262,8 +262,9 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
         - Wird ein Bild erkannt, wird in folgendes Muster umbenannt:
           (alteEXT)Basename.neueEXT  bzw. (NOEXT)Basename.neueEXT
           alteEXT = alte Extension ohne Punkt, bei keiner Extension "NOEXT".
-        - neueEXT wird aus dem erkannten Format gemappt; gibt es kein Mapping,
-          wird NICHT auf .jpg zurückgefallen, sondern der Name unverändert gelassen.
+        - neueEXT wird aus dem erkannten Format gemappt.
+          Für .thumb/.thm wird immer .jpg verwendet (Spezialfall Thumbnail).
+          Gibt es sonst kein Mapping, bleibt der Name unverändert.
 
         - HEIC bleibt immer HEIC (.heic); es findet KEINE Normalisierung auf .jpg statt.
 
@@ -282,10 +283,16 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     fmt = detect_image_format(path)  # z.B. "JPEG", "PNG", "HEIC", ...
     if fmt:
         fmt_upper = (fmt or "").upper()
+
+        # Standard-Mapping
         new_ext = image_format_to_suffix(fmt_upper)
 
-        # Wenn das Format nicht gemappt werden kann, Name unverändert lassen
-        # (kein allgemeiner Fallback auf .jpg!)
+        # Spezialfall: Thumbnails (.thumb / .thm) immer als JPG behandeln,
+        # wenn sie überhaupt als Bild erkannt wurden.
+        if suffix in {".thumb", ".thm"}:
+            new_ext = ".jpg"
+
+        # Wenn kein Mapping existiert und es auch kein Thumbnail-Spezialfall ist:
         if not new_ext:
             log_print(
                 f" -> Bildformat erkannt ({fmt_upper}), aber kein Mapping – "
@@ -333,6 +340,7 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     # 3) Weder als Bild erkennbar noch Video mit bekannter Extension
     log_print(" -> Weder Bild noch (bekanntes) Video erkannt")
     return None
+
 
 
 
