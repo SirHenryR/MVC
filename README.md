@@ -20,3 +20,7 @@ no switch: rename files and delete invalid media files
 Logfile will be appended if existing. 
 
 There is a timeout set to 15 seconds (see sourcecode) for the checking.
+
+### Necessary packages  
+
+Needs ffmpeg for video-checking (much more robust than the formerly used opencv) and pillow-heif for Apple devices.
