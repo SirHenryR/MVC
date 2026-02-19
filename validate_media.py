@@ -248,6 +248,7 @@ def image_format_to_suffix(fmt: str) -> Optional[str]:
 
 
 
+
 # ----------------------------------------------------------------------
 # Vor-Normalisierung: Bild/Video erkennen und Extension anpassen
 # ----------------------------------------------------------------------
@@ -279,20 +280,30 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
     suffix = path.suffix.lower()
     stem = path.stem
 
+    # 0) Spezialfall: .thumb / .thm – erst versuchen, ob es ein Bild ist
+    if suffix in {".thumb", ".thm"}:
+        fmt_thumb = detect_image_format(path)
+        if fmt_thumb:
+            # Egal welches Bildformat, Thumbnails werden immer als JPG normalisiert
+            old_ext_clean = suffix.lstrip(".") or "NOEXT"
+            new_ext = ".jpg"
+            new_name = f"({old_ext_clean}){stem}{new_ext}"
+            new_path = next_free_name(path.with_name(new_name))
+            log_print(
+                f" -> Thumbnail-Spezialfall: {path.name} -> {new_path.name}"
+            )
+            path.rename(new_path)
+            return new_path
+        # Wenn nicht als Bild erkennbar, weiter unten wie „kein Bild“ behandeln
+
     # 1) Bild immer per Inhalt prüfen (unabhängig von der Extension)
     fmt = detect_image_format(path)  # z.B. "JPEG", "PNG", "HEIC", ...
     if fmt:
         fmt_upper = (fmt or "").upper()
-
-        # Standard-Mapping
         new_ext = image_format_to_suffix(fmt_upper)
 
-        # Spezialfall: Thumbnails (.thumb / .thm) immer als JPG behandeln,
-        # wenn sie überhaupt als Bild erkannt wurden.
-        if suffix in {".thumb", ".thm"}:
-            new_ext = ".jpg"
-
-        # Wenn kein Mapping existiert und es auch kein Thumbnail-Spezialfall ist:
+        # Wenn das Format nicht gemappt werden kann, Name unverändert lassen
+        # (kein allgemeiner Fallback auf .jpg!)
         if not new_ext:
             log_print(
                 f" -> Bildformat erkannt ({fmt_upper}), aber kein Mapping – "
@@ -444,7 +455,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     Ablauf:
         - Alle Dateien aus der JSON werden zunächst per detect_media_and_normalize_suffix
           normalisiert (Bildinhalte bekommen richtige Extension, alte Extension/NOEXT
-          wird vorangestellt).
+          wird vorangestellt; .thumb/.thm -> JPG-Thumbnail).
         - Anschließend werden die normalisierten Dateien mit Timeout im Pool geprüft
           (is_valid_media).
         - Gültige Dateien werden umbenannt/verschoben wie in der JSON vorgegeben,
@@ -585,9 +596,9 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             valid_count += 1
 
             # Nach der Vor-Normalisierung ist der Dateiname bereits „sauber“
-            # (mit (alteEXT)/(NOEXT)), und die Extension entspricht dem erkannten
-            # Bildformat bzw. dem Videoformat. Hier wird nur noch auf den Zielnamen
-            # aus der JSON abgebildet.
+            # (mit (alteEXT)/(NOEXT)/(thumb)/(thm)), und die Extension entspricht
+            # dem erkannten Bildformat bzw. dem Videoformat. Hier wird nur noch auf
+            # den Zielnamen aus der JSON abgebildet.
             target_name = file_name
 
             if move_mode:
