@@ -24,6 +24,7 @@ try:
 except ImportError:
     HEIC_SUPPORTED = False
 
+
 # ----------------------------------------------------------------------
 # Logging
 # ----------------------------------------------------------------------
@@ -69,9 +70,9 @@ def has_ffprobe() -> bool:
 def is_valid_video_ffprobe(path: Path, timeout: float = 10.0) -> Optional[bool]:
     """
     Prüft mit ffprobe, ob die Datei ein lesbares Video mit mind. einem Videostream enthält.
-    True = ffprobe findet Videostream, Rückgabecode 0
+    True  = ffprobe findet Videostream, Rückgabecode 0
     False = ffprobe-Fehler, kein Videostream oder Auswertungsfehler
-    None = ffprobe nicht verfügbar oder Timeout
+    None  = ffprobe nicht verfügbar oder Timeout
     """
     if not has_ffprobe():
         log_print(" ffprobe nicht gefunden (nicht im PATH)")
@@ -234,7 +235,6 @@ def image_format_to_suffix(fmt: str) -> Optional[str]:
 
 # ----------------------------------------------------------------------
 # Vor-Normalisierung: Bild/Video erkennen und Extension anpassen
-# (Version mit idempotenter Thumbnail-Logik und korrekter Extension-Prüfung)
 # ----------------------------------------------------------------------
 
 
@@ -275,7 +275,6 @@ def detect_media_and_normalize_suffix(path: Path) -> Optional[Path]:
             path.rename(new_path)
             return new_path
         except FileNotFoundError:
-            # Falls das Ziel schon existiert (z.B. von einem früheren Lauf), nimm das
             if new_path.exists():
                 log_print(
                     " -> Ursprungs-Thumbnail fehlt, Ziel existiert bereits – "
@@ -376,7 +375,6 @@ def is_valid_media(path: Path, timeout: float) -> Optional[bool]:
         if HEIC_SUPPORTED:
             known_image_suffixes.append(".heic")
 
-        # Dateien mit bekannter Bild-Endung
         if suffix in known_image_suffixes:
             from PIL import Image, ImageFile
             ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -399,16 +397,13 @@ def is_valid_media(path: Path, timeout: float) -> Optional[bool]:
         ]
         if suffix in known_video_suffixes:
             ok = is_valid_video_ffprobe(path, timeout=timeout)
-            # ok kann True, False oder None sein
-            return ok
+            return ok  # True/False/None
 
-        # Alles andere (inkl. Dateien ohne Extension):
-        # Versuch, ob es sich inhaltlich um ein Bild handelt.
+        # Alles andere: Versuch als Bild
         fmt = detect_image_format(path)
         if fmt:
             return True
 
-        # unbekanntes Format -> ungültig
         return False
     except Exception as e:
         log_print(f" Medienprüfung fehlgeschlagen: {e}")
@@ -427,11 +422,9 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     Ablauf:
         - Vor-Normalisierung (detect_media_and_normalize_suffix)
         - Medienprüfung (is_valid_media)
-        - Gültige Dateien werden mit ihrem normalisierten Namen verschoben:
-          - Move-Modus: nach base_dir/valid/
-          - Standard: im Medienordner umbenannt
-        - Wenn die Ursprungsdatei während der Vorprüfung schon nicht mehr existiert,
-          wird nur geloggt und nichts mehr verschoben/gelöscht.
+        - Endname basiert auf JSON-FileName, aber normalisiert:
+          * .thumb/.thm -> (thumb)Basename.jpg
+          * sonst JSON-Name, ggf. mit _1, _2 usw. bei Kollision.
     """
     timeout_dir = base_dir / "timeout"
     timeout_dir.mkdir(exist_ok=True)
@@ -456,14 +449,27 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             media_files = media.get("MediaFiles") or []
             if not rel_path or not media_files:
                 continue
+
             file_name = media_files[0].get("FileName")
             if not file_name:
                 continue
+
             old_path = base_dir / Path(rel_path.replace("\\", "/"))
             if not old_path.exists():
                 log_print(f"Warnung: Datei nicht gefunden: {old_path}")
                 continue
-            tasks.append((old_path, file_name))
+
+            # Normalisierter Zielname basierend auf JSON-FileName:
+            json_target = Path(file_name)
+            json_suffix = json_target.suffix.lower()
+            json_stem = json_target.stem
+
+            if json_suffix in {".thumb", ".thm"}:
+                norm_target_name = f"(thumb){json_stem}.jpg"
+            else:
+                norm_target_name = file_name
+
+            tasks.append((old_path, norm_target_name))
 
     log_print(f"Zu prüfende Dateien (aus JSON): {len(tasks)}")
 
@@ -480,7 +486,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
         return
 
     # 2. Dateien sequentiell prüfen
-    for old_path, file_name in tasks:
+    for old_path, norm_target_name in tasks:
         # 2.1 Vor-Normalisierung
         log_print(f"\nPrüfe (Vor-Normalisierung): {old_path}")
         norm_path = detect_media_and_normalize_suffix(old_path)
@@ -551,7 +557,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
 
         # 2.3 Gültige Dateien verschieben/umbenennen
         valid_count += 1
-        target_name = old_path.name  # normalisierter Name
+        target_name = norm_target_name  # JSON-basierter, normalisierter Name
 
         if move_mode:
             desired_dest = (base_dir / "valid") / target_name
@@ -647,12 +653,12 @@ def cleanup_directory(directory: Path) -> None:
 
 
 # ----------------------------------------------------------------------
-# CLI / main (unverändert bis auf entfernte Worker-Logik)
+# CLI / main
 # ----------------------------------------------------------------------
 
 
 def print_help(prog: str) -> None:
-    print(
+    text = (
         f"Verwendung:\n\n"
         f"{prog}\n"
         f"    Standard: Gültige Dateien umbenennen, ungültige löschen.\n\n"
@@ -665,6 +671,7 @@ def print_help(prog: str) -> None:
         f"Optionen:\n"
         f"    -l  Logging in Logdatei aktivieren.\n"
     )
+    print(text)
 
 
 def main() -> None:
