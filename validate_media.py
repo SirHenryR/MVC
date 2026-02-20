@@ -15,7 +15,7 @@ from typing import Optional, Tuple, List
 # Konfiguration
 MEDIA_CHECK_TIMEOUT = 10.0  # Sekunden Timeout pro Datei
 LOG_ENABLED = False         # wird in main() durch -l gesetzt
-MAX_WORKERS = 4             # maximale Anzahl Worker-Prozesse (0/None = alle CPUs)
+MAX_WORKERS = 4            # maximale Anzahl Worker-Prozesse (0/None = alle CPUs)
 
 # HEIF/HEIC-Unterstützung registrieren (falls installiert)
 HEIC_SUPPORTED = False
@@ -204,6 +204,7 @@ def _calc_workers() -> int:
     return cpu_count()
 
 
+
 # ----------------------------------------------------------------------
 # Dateien inhaltlich als Bild erkennen
 # ----------------------------------------------------------------------
@@ -360,45 +361,39 @@ def _check_media_worker(path: Path) -> bool:
     """
     Läuft im Worker-Prozess.
     Gibt True (gültig) oder False (ungültig) zurück.
+    Keine Timeouts hier; Timeout wird im Hauptprozess gehandhabt.
     """
     suffix = path.suffix.lower()
     try:
         known_image_suffixes = [
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".gif",
-            ".bmp",
-            ".tiff",
-            ".webp",
-            ".tif",
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp",
+            ".tiff", ".webp", ".tif",
         ]
         if HEIC_SUPPORTED:
             known_image_suffixes.append(".heic")
+
+        # Bild mit bekannter Extension
         if suffix in known_image_suffixes:
             from PIL import Image, ImageFile
             ImageFile.LOAD_TRUNCATED_IMAGES = True
             with Image.open(path) as img:
                 img.load()
             return True
+
+        # Video
         known_video_suffixes = [
-            ".mp4",
-            ".avi",
-            ".mov",
-            ".mkv",
-            ".flv",
-            ".wmv",
-            ".webm",
-            ".m4v",
-            ".hevc",
-            ".h265",
+            ".mp4", ".avi", ".mov", ".mkv", ".flv",
+            ".wmv", ".webm", ".m4v", ".hevc", ".h265",
         ]
         if suffix in known_video_suffixes:
             ok = is_valid_video_ffprobe(path, timeout=10.0)
             return bool(ok)
+
+        # Sonst: versuchen als Bild
         fmt = detect_image_format(path)
         if fmt:
             return True
+
         return False
     except Exception as e:
         log_print(f" Medienprüfung fehlgeschlagen: {e}")
@@ -408,7 +403,9 @@ def _check_media_worker(path: Path) -> bool:
 def is_valid_media(path: Path, timeout: float, pool: Pool) -> Optional[bool]:
     """
     Prüft mit Timeout im Hauptprozess, ob Datei ein gültiges Bild/Video ist.
-    True = gültig, False = ungültig, None = Timeout/Fehler.
+    True  = gültig
+    False = ungültig
+    None  = Timeout/Fehler im Worker
     """
     async_result = pool.apply_async(_check_media_worker, (path,))
     try:
@@ -429,16 +426,14 @@ def is_valid_media(path: Path, timeout: float, pool: Pool) -> Optional[bool]:
 
 def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> None:
     """
-    Verarbeitet Mediendateien aus der ProjectVic-JSON.
+    Verarbeitet Mediendateien aus der ProjectVic-JSON, parallel mit Pool.
 
     Ablauf:
         - Vor-Normalisierung (detect_media_and_normalize_suffix)
-        - Medienprüfung mit Timeout (is_valid_media)
-        - Gültige Dateien werden mit ihrem normalisierten Namen verschoben:
-          - Move-Modus: nach base_dir/valid/
-          - Standard: im Medienordner umbenannt
-        - Wenn die Ursprungsdatei während der Vorprüfung schon nicht mehr existiert,
-          wird nur geloggt und nichts mehr verschoben/gelöscht.
+        - Medienprüfung (is_valid_media mit Pool/Timeout)
+        - Endname basiert auf JSON-FileName, aber normalisiert:
+          * .thumb/.thm -> (thumb)Basename.jpg
+          * sonst JSON-Name, ggf. mit _1, _2 usw. bei Kollision.
     """
     timeout_dir = base_dir / "timeout"
     timeout_dir.mkdir(exist_ok=True)
@@ -463,14 +458,27 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
             media_files = media.get("MediaFiles") or []
             if not rel_path or not media_files:
                 continue
+
             file_name = media_files[0].get("FileName")
             if not file_name:
                 continue
+
             old_path = base_dir / Path(rel_path.replace("\\", "/"))
             if not old_path.exists():
                 log_print(f"Warnung: Datei nicht gefunden: {old_path}")
                 continue
-            tasks.append((old_path, file_name))
+
+            # Normalisierter Zielname basierend auf JSON-FileName:
+            json_target = Path(file_name)
+            json_suffix = json_target.suffix.lower()
+            json_stem = json_target.stem
+
+            if json_suffix in {".thumb", ".thm"}:
+                norm_target_name = f"(thumb){json_stem}.jpg"
+            else:
+                norm_target_name = file_name
+
+            tasks.append((old_path, norm_target_name))
 
     log_print(f"Zu prüfende Dateien (aus JSON): {len(tasks)}")
 
@@ -489,23 +497,19 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
     workers = _calc_workers()
     log_print(f"Starte Prüfungen mit {workers} Worker-Prozess(en)")
 
-    # 2. Pool erstellen und pro Datei mit Timeout prüfen
+    # 2. Dateien parallel prüfen
     with Pool(processes=workers) as pool:
-        for old_path, file_name in tasks:
+        for old_path, norm_target_name in tasks:
             # 2.1 Vor-Normalisierung
             log_print(f"\nPrüfe (Vor-Normalisierung): {old_path}")
             norm_path = detect_media_and_normalize_suffix(old_path)
 
             if norm_path is None:
-                # Kann zwei Gründe haben:
-                # 1. Weder Bild noch Video (wirklich ungültig)
-                # 2. Datei wurde zwischenzeitlich umbenannt/gelöscht (Race)
                 if not old_path.exists():
                     log_print(
                         " -> Vorprüfung abgebrochen: Ursprungsdatei existiert nicht mehr, "
                         "kein weiterer Eingriff."
                     )
-                    # NICHT versuchen, nach invalid/ zu verschieben oder zu löschen
                     continue
 
                 log_print(" -> Keine gültige Bild-/Videodatei (Vorprüfung)")
@@ -527,14 +531,12 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
                         log_print(f" -> Fehler beim Löschen: {e}")
                 continue
 
-            # Ab hier nur noch mit dem normalisierten Pfad arbeiten
             old_path = norm_path
 
-            # 2.2 Hauptprüfung
+            # 2.2 Hauptprüfung (parallel)
             log_print(f"\nPrüfe (Hauptprüfung): {old_path}")
             check_result = is_valid_media(old_path, MEDIA_CHECK_TIMEOUT, pool)
 
-            # None = Timeout / Fehler -> Datei nach timeout/ verschieben
             if check_result is None:
                 skipped_timeout += 1
                 dest = next_free_name(timeout_dir / old_path.name)
@@ -547,7 +549,6 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
                     log_print(f" -> Fehler beim Verschieben: {e}")
                 continue
 
-            # Ungültig (False)
             if not check_result:
                 invalid_count += 1
                 if move_mode:
@@ -569,9 +570,7 @@ def rename_media_files(json_data, base_dir: Path, move_mode: bool = False) -> No
 
             # 2.3 Gültige Dateien verschieben/umbenennen
             valid_count += 1
-
-            # Jetzt den normalisierten Namen verwenden, nicht den JSON-FileName
-            target_name = old_path.name
+            target_name = norm_target_name  # JSON-basierter, normalisierter Name
 
             if move_mode:
                 desired_dest = (base_dir / "valid") / target_name
