@@ -1,5 +1,5 @@
 # MVC
-Media Validation for Cellebrite JSON
+Media Validation and renameing for Cellebrite JSON
 
 ## Purpose of script
 
